@@ -511,32 +511,6 @@ Each indexed chunk stores
 
 ---
 
-# 📸 Demo
-
-## Upload Documents
-
-(Add Screenshot)
-
----
-
-## Upload YouTube
-
-(Add Screenshot)
-
----
-
-## Chat Interface
-
-(Add Screenshot)
-
----
-
-## Swagger API
-
-(Add Screenshot)
-
----
-
 # 👨‍💻 Author
 
 **Mukund Raj**
