@@ -14,10 +14,17 @@ from pathlib import Path
 
 from pypdf import PdfReader
 from docx import Document
-from youtube_transcript_api import YouTubeTranscriptApi
+
+
+from youtube_transcript_api import (
+    YouTubeTranscriptApi
+)
+from youtube_transcript_api._errors import (
+    TranscriptsDisabled,
+    NoTranscriptFound,
+)
+
 from urllib.parse import urlparse, parse_qs
-
-
 # ----------------------------
 # PDF
 # ----------------------------
@@ -71,42 +78,80 @@ def extract_txt(file_path: str) -> str:
 # YouTube Transcript
 # ----------------------------
 
-def get_video_id(url: str) -> str:
-    """
-    Extract video ID from YouTube URL.
-    """
+from youtube_transcript_api import YouTubeTranscriptApi
+from urllib.parse import urlparse, parse_qs
+
+
+from urllib.parse import urlparse, parse_qs
+
+from urllib.parse import urlparse, parse_qs
+
+
+def get_video_id(url: str):
 
     parsed = urlparse(url)
 
-    if parsed.hostname == "youtu.be":
-        return parsed.path[1:]
+    hostname = parsed.hostname.lower() if parsed.hostname else ""
 
-    if parsed.hostname in (
-        "www.youtube.com",
+    # youtube.com/watch?v=...
+    if hostname in (
         "youtube.com",
+        "www.youtube.com",
         "m.youtube.com",
     ):
-        return parse_qs(parsed.query)["v"][0]
 
-    raise ValueError("Invalid YouTube URL")
+        params = parse_qs(parsed.query)
 
+        if "v" in params:
+            return params["v"][0]
 
-def extract_youtube_transcript(url: str) -> str:
-    """
-    Download transcript from YouTube.
-    """
+        path = parsed.path.strip("/")
+
+        # youtube.com/embed/<id>
+        if path.startswith("embed/"):
+            return path.split("/")[1]
+
+        # youtube.com/shorts/<id>
+        if path.startswith("shorts/"):
+            return path.split("/")[1]
+
+        # youtube.com/live/<id>
+        if path.startswith("live/"):
+            return path.split("/")[1]
+
+    # youtu.be/<id>
+    elif hostname == "youtu.be":
+
+        return parsed.path.strip("/")
+
+    raise ValueError("Unsupported YouTube URL")
+
+def extract_youtube_transcript(url: str):
 
     video_id = get_video_id(url)
 
-    transcript = YouTubeTranscriptApi.get_transcript(video_id)
+    try:
 
-    full_text = ""
+        api = YouTubeTranscriptApi()
 
-    for chunk in transcript:
-        full_text += chunk["text"] + " "
+        transcript = api.fetch(video_id)
 
-    return full_text.strip()
+        text = ""
 
+        for item in transcript:
+            text += item.text + " "
+
+        return text
+
+    except TranscriptsDisabled:
+        raise Exception(
+            "This YouTube video has subtitles disabled."
+        )
+
+    except NoTranscriptFound:
+        raise Exception(
+            "No transcript available for this video."
+        )
 
 # ----------------------------
 # Dispatcher

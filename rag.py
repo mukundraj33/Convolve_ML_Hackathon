@@ -1,19 +1,3 @@
-"""
-rag.py
-
-Core Retrieval-Augmented Generation (RAG) pipeline.
-
-Responsibilities:
-- Load embedding model
-- Initialize Qdrant
-- Chunk documents
-- Generate embeddings
-- Store vectors
-"""
-
-from typing import List
-import uuid
-
 from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
@@ -22,244 +6,391 @@ from qdrant_client.models import (
     PointStruct,
 )
 
+from datetime import datetime
+import uuid
 
-from rank_bm25 import BM25Okapi
+from config import *
+import re
+import hashlib
+from models import SearchResult
 import ollama
-
-from utils import (
-    extract_text,
-    extract_youtube_transcript,
+from qdrant_client.models import (
+    Filter,
+    FieldCondition,
+    MatchValue,
 )
 
-class RAGPipeline:
+
+
+class RAGEngine:
+
     def __init__(self):
 
         print("Loading Embedding Model...")
 
         self.embedding_model = SentenceTransformer(
-            "BAAI/bge-base-en-v1.5"
+            EMBEDDING_MODEL
         )
 
         print("Embedding Model Loaded")
 
-        self.collection_name = "learnmate"
+        print("Connecting Qdrant...")
 
-        self.qdrant = QdrantClient(":memory:")
+        self.client = QdrantClient(
+            path=QDRANT_PATH
+        )
 
-        self._create_collection()
+        self.initialize_collection()
 
-        
-                # BM25 storage
-        self.bm25 = None
-        self.bm25_chunks = []
+        print("RAG Engine Ready")
 
-    def _create_collection(self):
+    def initialize_collection(self):
 
-        collections = self.qdrant.get_collections().collections
+        collections = self.client.get_collections().collections
 
         names = [c.name for c in collections]
 
-        if self.collection_name not in names:
+        if COLLECTION_NAME not in names:
 
-            self.qdrant.create_collection(
-                collection_name=self.collection_name,
+            self.client.create_collection(
+
+                collection_name=COLLECTION_NAME,
+
                 vectors_config=VectorParams(
-                    size=self.embedding_model.get_sentence_embedding_dimension(),
+
+                    size=self.embedding_model.get_embedding_dimension(),
+
                     distance=Distance.COSINE,
+
                 ),
             )
 
-    def chunk_text(self, text: str,
-               chunk_size: int = 500,
-               overlap: int = 100):
+    
+
+    def chunk_text(self, text: str):
+
+        sentences = re.split(r'(?<=[.!?])\s+', text)
 
         chunks = []
 
-        start = 0
+        current_chunk = ""
 
-        while start < len(text):
+        for sentence in sentences:
 
-            end = start + chunk_size
+            if len(current_chunk) + len(sentence) < CHUNK_SIZE:
 
-            chunks.append(text[start:end])
+                current_chunk += sentence + " "
 
-            start += chunk_size - overlap
+            else:
+
+                chunks.append(current_chunk.strip())
+
+                overlap = current_chunk[-CHUNK_OVERLAP:]
+
+                current_chunk = overlap + " " + sentence
+
+        if current_chunk:
+
+            chunks.append(current_chunk.strip())
 
         return chunks
+    
+    def add_document(
+    self,
+    text: str,
+    source_name: str,
+    source_type: str,
+):
 
-    def embed_chunks(self, chunks: List[str]):
+        print(f"\nProcessing {source_name}")
+
+        document_id = str(uuid.uuid4())
+
+        document_hash = self.generate_document_hash(text)
+
+        if self.document_exists(document_hash):
+
+            print("Document already indexed.")
+
+            return None
+
+        chunks = self.chunk_text(text)
+
+        print(f"Generated {len(chunks)} chunks")
 
         embeddings = self.embedding_model.encode(
             chunks,
             normalize_embeddings=True,
         )
 
-        return embeddings
-
-    def add_document(self, text: str, source: str):
-
-        chunks = self.chunk_text(text)
-
-        embeddings = self.embed_chunks(chunks)
-
         points = []
 
-        for idx, (chunk, vector) in enumerate(zip(chunks, embeddings)):
+        uploaded_at = datetime.utcnow().isoformat()
+
+        for idx, (chunk, embedding) in enumerate(
+            zip(chunks, embeddings)
+        ):
+
+            payload = {
+
+                "document_id": document_id,
+
+                "document_hash": document_hash,
+
+                "chunk_id": idx,
+
+                "text": chunk,
+
+                "source_name": source_name,
+
+                "source_type": source_type,
+
+                "uploaded_at": uploaded_at,
+
+                "token_count": len(chunk.split()),
+
+            }
 
             points.append(
+
                 PointStruct(
+
                     id=str(uuid.uuid4()),
-                    vector=vector.tolist(),
-                    payload={
-                        "text": chunk,
-                        "source": source,
-                        "chunk_id": idx,
-                    },
+
+                    vector=embedding.tolist(),
+
+                    payload=payload,
+
                 )
+
             )
 
-        self.qdrant.upsert(
-            collection_name=self.collection_name,
+        self.client.upsert(
+
+            collection_name=COLLECTION_NAME,
+
             points=points,
+
         )
 
-        # ---------- BM25 ----------
+        print(f"Stored {len(points)} vectors.")
 
-        self.bm25_chunks.extend(chunks)
+        return document_id
+    
+    def generate_document_hash(self, text: str):
 
-        tokenized = [doc.split() for doc in self.bm25_chunks]
+        return hashlib.sha256(
+            text.encode("utf-8")
+        ).hexdigest()
+        
+    def document_exists(self, document_hash: str):
 
-        self.bm25 = BM25Okapi(tokenized)
-
-        print(f"Stored {len(points)} chunks.")
-
-    def dense_search(
-        self,
-        query: str,
-        top_k: int = 5,
-    ):
-
-        query_vector = self.embedding_model.encode(
-            query,
-            normalize_embeddings=True,
-        ).tolist()
-
-        results = self.qdrant.query_points(
-            collection_name=self.collection_name,
-            query=query_vector,
-            limit=top_k,
+        results = self.client.scroll(
+            collection_name=COLLECTION_NAME,
+            scroll_filter=Filter(
+                must=[
+                    FieldCondition(
+                        key="document_hash",
+                        match=MatchValue(
+                            value=document_hash
+                        ),
+                    )
+                ]
+            ),
+            limit=1,
         )
 
-        return results.points
+        return len(results[0]) > 0
     
-    
-    def sparse_search(
-        self,
-        query: str,
-        top_k: int = 5,
-    ):
-
-        if self.bm25 is None:
-            return []
-
-        scores = self.bm25.get_scores(query.split())
-
-        ranked = sorted(
-            zip(self.bm25_chunks, scores),
-            key=lambda x: x[1],
-            reverse=True,
-        )
-
-        return ranked[:top_k]
-    
-    
-    def hybrid_search(
+    def retrieve(
     self,
     query: str,
     top_k: int = 5,
 ):
 
-        dense_results = self.dense_search(query, top_k)
+        query_vector = self.embedding_model.encode(
 
-        sparse_results = self.sparse_search(query, top_k)
+            query,
 
-        chunks = []
+            normalize_embeddings=True,
 
-        seen = set()
+        ).tolist()
 
-        # Dense retrieval
+        results = self.client.query_points(
 
-        for item in dense_results:
+            collection_name=COLLECTION_NAME,
 
-            text = item.payload["text"]
+            query=query_vector,
 
-            if text not in seen:
+            limit=top_k,
 
-                seen.add(text)
+        )
 
-                chunks.append(text)
+        retrieved_chunks = []
 
-        # Sparse retrieval
+        for point in results.points:
 
-        for text, _ in sparse_results:
+            retrieved_chunks.append(
 
-            if text not in seen:
+                SearchResult(
 
-                seen.add(text)
+                    score=point.score,
 
-                chunks.append(text)
+                    payload=point.payload,
 
-        return chunks[:top_k]
-    
-    
+                )
+
+            )
+
+        return retrieved_chunks
     
     def build_prompt(
     self,
-    query,
-    retrieved_chunks,
+    query: str,
+    search_results,
 ):
 
-        context = "\n\n".join(retrieved_chunks)
+        context = []
+
+        for result in search_results:
+
+            payload = result.payload
+
+            context.append(
+
+                f"""
+    Source : {payload['source_name']}
+    Type   : {payload['source_type']}
+    Chunk  : {payload['chunk_id']}
+
+    Content:
+    {payload['text']}
+    """
+            )
+
+        context = "\n\n".join(context)
 
         prompt = f"""
-    You are an AI learning assistant.
+    You are LearnMate AI.
 
-    Answer ONLY from the provided context.
+    You are an educational assistant.
 
-    If the answer is not present,
-    say:
+    Rules:
 
-    "I cannot answer using the uploaded resources."
+    1. Answer ONLY from the supplied context.
 
-    Context:
+    2. If the answer is not present,
+    say
+
+    "I could not find the answer in the uploaded resources."
+
+    3. Never make up information.
+
+    4. Keep answers concise.
+
+    5. Never generate citations or page numbers.
+
+    6. Never invent document names.
+
+    7. The application will attach citations automatically.
+
+    =========================
+    Retrieved Context
+    =========================
 
     {context}
 
-    Question:
+    =========================
+    Question
+    =========================
 
     {query}
 
-    Answer:
+    =========================
+    Answer
+    =========================
     """
 
         return prompt
     
     
-    def stream_answer(
+    def generate_answer(
     self,
-    query,
+    query: str,
 ):
 
-        retrieved_chunks = self.hybrid_search(query)
+        search_results = self.retrieve(query)
 
         prompt = self.build_prompt(
             query,
-            retrieved_chunks,
+            search_results,
+        )
+
+        response = ollama.chat(
+
+            model=LLM_MODEL,
+
+            messages=[
+
+                {
+
+                    "role": "user",
+
+                    "content": prompt,
+
+                }
+
+            ],
+
+        )
+
+        answer = response["message"]["content"]
+
+        citations = []
+
+        seen = set()
+
+        for result in search_results:
+
+            payload = result.payload
+
+            key = (
+                payload["source_name"],
+                payload["chunk_id"],
+            )
+
+            if key not in seen:
+
+                seen.add(key)
+
+                citations.append(
+
+                    f"- {payload['source_name']} "
+                    f"(Chunk {payload['chunk_id']})"
+
+                )
+
+        answer += "\n\nSources\n"
+
+        answer += "\n".join(citations)
+
+        return answer, search_results
+    
+    def stream_answer(
+    self,
+    query: str,
+):
+
+        search_results = self.retrieve(query)
+
+        prompt = self.build_prompt(
+            query,
+            search_results,
         )
 
         stream = ollama.chat(
 
-            model="llama3.1:8b",
+            model=LLM_MODEL,
 
             messages=[
                 {
@@ -274,23 +405,3 @@ class RAGPipeline:
         for chunk in stream:
 
             yield chunk["message"]["content"]
-            
-            
-    def ingest_file(self, file_path: str):
-
-        text = extract_text(file_path)
-
-        self.add_document(
-            text=text,
-            source=file_path,
-        )
-
-
-    def ingest_youtube(self, url: str):
-
-        transcript = extract_youtube_transcript(url)
-
-        self.add_document(
-            text=transcript,
-            source=url,
-        )

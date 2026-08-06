@@ -1,0 +1,7 @@
+Deep Learning uses neural networks.
+
+Machine Learning is a subset of AI.
+
+RAG improves factual accuracy.
+
+Transformers are attention based models.

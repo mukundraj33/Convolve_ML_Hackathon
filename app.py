@@ -1,131 +1,195 @@
 import gradio as gr
+import requests
 
-from rag import RAGPipeline
-
-rag = RAGPipeline()
+API = "http://127.0.0.1:8000"
 
 
-# -----------------------------
-# Upload File
-# -----------------------------
 def upload_document(file):
 
     if file is None:
-        return "Please upload a document."
 
-    rag.ingest_file(file.name)
+        return "Please choose a file."
 
-    return "Document uploaded successfully."
+    with open(file.name, "rb") as f:
 
+        response = requests.post(
 
-# -----------------------------
-# Upload YouTube
-# -----------------------------
-def upload_youtube(url):
+            f"{API}/upload",
 
-    if not url.strip():
-        return "Enter a YouTube URL."
+            files={
 
-    rag.ingest_youtube(url)
+                "file": (
 
-    return "Transcript added successfully."
+                    file.name.split("/")[-1],
 
+                    f,
 
-# -----------------------------
-# Ask Question
-# -----------------------------
-def ask_question(query):
+                )
 
-    if not query.strip():
-        return ""
+            },
 
-    answer = ""
-
-    for token in rag.stream_answer(query):
-
-        answer += token
-
-        yield answer
-
-
-# -----------------------------
-# UI
-# -----------------------------
-with gr.Blocks(title="LearnMate AI") as demo:
-
-    gr.Markdown(
-        """
-# LearnMate AI
-
-### Multimodal Learning Assistant
-
-Supported Sources
-
-- PDF
-
-- DOCX
-
-- TXT
-
-- YouTube Lecture Transcript
-"""
-    )
-
-    with gr.Tab("Upload Document"):
-
-        file_input = gr.File()
-
-        upload_btn = gr.Button("Upload")
-
-        upload_output = gr.Textbox(label="Status")
-
-        upload_btn.click(
-            upload_document,
-            inputs=file_input,
-            outputs=upload_output,
         )
 
-    with gr.Tab("YouTube"):
+    if response.status_code == 200:
 
-        youtube_url = gr.Textbox(
+        return "✅ Document uploaded successfully."
+
+    return response.text
+
+
+def upload_youtube(url):
+
+    response = requests.post(
+
+        f"{API}/youtube",
+
+        json={
+
+            "url": url
+
+        },
+
+    )
+
+    if response.status_code == 200:
+
+        return "✅ Transcript indexed."
+
+    return response.text
+
+
+def ask_question(question):
+
+    response = requests.post(
+
+        f"{API}/query",
+
+        json={
+
+            "question": question
+
+        },
+
+    )
+
+    if response.status_code != 200:
+
+        return response.text
+
+    return response.json()["answer"]
+
+
+
+with gr.Blocks(
+
+    title="LearnMate AI"
+
+) as demo:
+
+    gr.Markdown(
+
+        "# 📚 LearnMate AI"
+
+    )
+
+    gr.Markdown(
+
+        "### Multimodal Educational Assistant"
+
+    )
+
+    with gr.Tab("📄 Documents"):
+
+        file = gr.File(
+
+            label="Upload PDF / DOCX / TXT"
+
+        )
+
+        upload_btn = gr.Button(
+
+            "Upload"
+
+        )
+
+        upload_status = gr.Textbox(
+
+            label="Status"
+
+        )
+
+        upload_btn.click(
+
+            upload_document,
+
+            inputs=file,
+
+            outputs=upload_status,
+
+        )
+
+    with gr.Tab("🎥 YouTube"):
+
+        youtube = gr.Textbox(
+
             label="YouTube URL"
+
         )
 
         youtube_btn = gr.Button(
-            "Add Transcript"
+
+            "Ingest Video"
+
         )
 
-        youtube_output = gr.Textbox(
+        youtube_status = gr.Textbox(
+
             label="Status"
+
         )
 
         youtube_btn.click(
+
             upload_youtube,
-            inputs=youtube_url,
-            outputs=youtube_output,
+
+            inputs=youtube,
+
+            outputs=youtube_status,
+
         )
 
-    with gr.Tab("Ask Questions"):
+    with gr.Tab("💬 Ask"):
 
         question = gr.Textbox(
-            label="Question",
-            lines=2,
+
+            lines=3,
+
+            label="Question"
+
         )
 
         ask_btn = gr.Button(
+
             "Ask"
+
         )
 
         answer = gr.Textbox(
-            label="Answer",
-            lines=18,
+
+            lines=15,
+
+            label="Answer"
+
         )
 
         ask_btn.click(
-            ask_question,
-            inputs=question,
-            outputs=answer,
-        )
 
+            ask_question,
+
+            inputs=question,
+
+            outputs=answer,
+
+        )
 
 demo.launch()
