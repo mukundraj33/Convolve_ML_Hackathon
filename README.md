@@ -544,14 +544,10 @@ Each indexed chunk stores
 Final Year Undergraduate  
 Indian Institute of Technology Bombay
 
-GitHub: https://github.com/yourusername
+GitHub: https://github.com/mukundraj33
 
-LinkedIn: https://linkedin.com/in/yourprofile
+LinkedIn: https://linkedin.com/in/mukundrajiitb
 
-Portfolio: https://yourportfolio.com
+Portfolio: https://mukundraj.com
 
 ---
-
-# ⭐ If you found this project useful
-
-Please consider giving it a ⭐ on GitHub.
