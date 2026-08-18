@@ -1,195 +1,26 @@
-import gradio as gr
-import requests
-
-API = "http://127.0.0.1:8000"
-
-
+"""Small Gradio presentation layer that calls FastAPI only."""
+import os, requests, gradio as gr
+API=os.getenv("API_URL","http://127.0.0.1:8000")
 def upload_document(file):
-
-    if file is None:
-
-        return "Please choose a file."
-
-    with open(file.name, "rb") as f:
-
-        response = requests.post(
-
-            f"{API}/upload",
-
-            files={
-
-                "file": (
-
-                    file.name.split("/")[-1],
-
-                    f,
-
-                )
-
-            },
-
-        )
-
-    if response.status_code == 200:
-
-        return "✅ Document uploaded successfully."
-
-    return response.text
-
-
+    if file is None:return "Please choose a file."
+    with open(file.name,"rb") as handle: response=requests.post(f"{API}/upload",files={"file":(os.path.basename(file.name),handle)},timeout=120)
+    return "Document uploaded successfully." if response.ok else response.text
 def upload_youtube(url):
-
-    response = requests.post(
-
-        f"{API}/youtube",
-
-        json={
-
-            "url": url
-
-        },
-
-    )
-
-    if response.status_code == 200:
-
-        return "✅ Transcript indexed."
-
-    return response.text
-
-
-def ask_question(question):
-
-    response = requests.post(
-
-        f"{API}/query",
-
-        json={
-
-            "question": question
-
-        },
-
-    )
-
-    if response.status_code != 200:
-
-        return response.text
-
-    return response.json()["answer"]
-
-
-
-with gr.Blocks(
-
-    title="LearnMate AI"
-
-) as demo:
-
-    gr.Markdown(
-
-        "# 📚 LearnMate AI"
-
-    )
-
-    gr.Markdown(
-
-        "### Multimodal Educational Assistant"
-
-    )
-
-    with gr.Tab("📄 Documents"):
-
-        file = gr.File(
-
-            label="Upload PDF / DOCX / TXT"
-
-        )
-
-        upload_btn = gr.Button(
-
-            "Upload"
-
-        )
-
-        upload_status = gr.Textbox(
-
-            label="Status"
-
-        )
-
-        upload_btn.click(
-
-            upload_document,
-
-            inputs=file,
-
-            outputs=upload_status,
-
-        )
-
-    with gr.Tab("🎥 YouTube"):
-
-        youtube = gr.Textbox(
-
-            label="YouTube URL"
-
-        )
-
-        youtube_btn = gr.Button(
-
-            "Ingest Video"
-
-        )
-
-        youtube_status = gr.Textbox(
-
-            label="Status"
-
-        )
-
-        youtube_btn.click(
-
-            upload_youtube,
-
-            inputs=youtube,
-
-            outputs=youtube_status,
-
-        )
-
-    with gr.Tab("💬 Ask"):
-
-        question = gr.Textbox(
-
-            lines=3,
-
-            label="Question"
-
-        )
-
-        ask_btn = gr.Button(
-
-            "Ask"
-
-        )
-
-        answer = gr.Textbox(
-
-            lines=15,
-
-            label="Answer"
-
-        )
-
-        ask_btn.click(
-
-            ask_question,
-
-            inputs=question,
-
-            outputs=answer,
-
-        )
-
-demo.launch()
+    response=requests.post(f"{API}/youtube",json={"url":url},timeout=120); return "Transcript indexed." if response.ok else response.text
+def ask(question,session_id):
+    response=requests.post(f"{API}/query/stream",json={"question":question,"session_id":session_id or None},stream=True,timeout=180)
+    if not response.ok: yield response.text,session_id; return
+    active=response.headers.get("X-Session-ID",session_id); answer=""
+    for token in response.iter_content(chunk_size=None,decode_unicode=True): answer+=token; yield answer,active
+with gr.Blocks(title="LearnMate AI") as demo:
+    gr.Markdown("# LearnMate AI\nMultimodal Hybrid RAG for personalized learning")
+    with gr.Row():
+        file=gr.File(label="Upload PDF / DOCX / TXT"); upload=gr.Button("Upload"); status=gr.Textbox(label="Status")
+    upload.click(upload_document,file,status)
+    with gr.Row():
+        url=gr.Textbox(label="YouTube URL"); ingest=gr.Button("Ingest"); yt_status=gr.Textbox(label="Status")
+    ingest.click(upload_youtube,url,yt_status)
+    session_id=gr.Textbox(label="Session ID (leave blank to start a session)")
+    question=gr.Textbox(label="Question",lines=3); ask_button=gr.Button("Ask"); answer=gr.Textbox(label="Streaming answer",lines=15)
+    ask_button.click(ask,[question,session_id],[answer,session_id])
+if __name__=="__main__": demo.launch(server_name="0.0.0.0")

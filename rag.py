@@ -1,407 +1,80 @@
+"""Qdrant dense search + persistent-rebuildable BM25 + RRF generation engine."""
+from datetime import datetime, timezone
+import hashlib, re, uuid
+import ollama
+from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient
-from qdrant_client.models import (
-    Distance,
-    VectorParams,
-    PointStruct,
-)
-
-from datetime import datetime
-import uuid
-
+from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
 from config import *
-import re
-import hashlib
 from models import SearchResult
-import ollama
-from qdrant_client.models import (
-    Filter,
-    FieldCondition,
-    MatchValue,
-)
-
-
 
 class RAGEngine:
-
     def __init__(self):
-
-        print("Loading Embedding Model...")
-
-        self.embedding_model = SentenceTransformer(
-            EMBEDDING_MODEL
-        )
-
-        print("Embedding Model Loaded")
-
-        print("Connecting Qdrant...")
-
-        self.client = QdrantClient(
-            path=QDRANT_PATH
-        )
-
-        self.initialize_collection()
-
-        print("RAG Engine Ready")
-
+        self.embedding_model = SentenceTransformer(EMBEDDING_MODEL)
+        self.client = QdrantClient(url=QDRANT_URL) if QDRANT_URL else QdrantClient(path=QDRANT_PATH)
+        self.initialize_collection(); self._bm25 = None; self._bm25_chunks = []; self.rebuild_bm25_index()
     def initialize_collection(self):
-
-        collections = self.client.get_collections().collections
-
-        names = [c.name for c in collections]
-
-        if COLLECTION_NAME not in names:
-
-            self.client.create_collection(
-
-                collection_name=COLLECTION_NAME,
-
-                vectors_config=VectorParams(
-
-                    size=self.embedding_model.get_embedding_dimension(),
-
-                    distance=Distance.COSINE,
-
-                ),
-            )
-
-    
-
-    def chunk_text(self, text: str):
-
-        sentences = re.split(r'(?<=[.!?])\s+', text)
-
-        chunks = []
-
-        current_chunk = ""
-
+        if COLLECTION_NAME not in {c.name for c in self.client.get_collections().collections}:
+            self.client.create_collection(COLLECTION_NAME, vectors_config=VectorParams(size=self.embedding_model.get_embedding_dimension(), distance=Distance.COSINE))
+    def chunk_text(self, text):
+        sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if s.strip()]; chunks=[]; current=""
         for sentence in sentences:
-
-            if len(current_chunk) + len(sentence) < CHUNK_SIZE:
-
-                current_chunk += sentence + " "
-
-            else:
-
-                chunks.append(current_chunk.strip())
-
-                overlap = current_chunk[-CHUNK_OVERLAP:]
-
-                current_chunk = overlap + " " + sentence
-
-        if current_chunk:
-
-            chunks.append(current_chunk.strip())
-
-        return chunks
-    
-    def add_document(
-    self,
-    text: str,
-    source_name: str,
-    source_type: str,
-):
-
-        print(f"\nProcessing {source_name}")
-
-        document_id = str(uuid.uuid4())
-
-        document_hash = self.generate_document_hash(text)
-
-        if self.document_exists(document_hash):
-
-            print("Document already indexed.")
-
-            return None
-
-        chunks = self.chunk_text(text)
-
-        print(f"Generated {len(chunks)} chunks")
-
-        embeddings = self.embedding_model.encode(
-            chunks,
-            normalize_embeddings=True,
-        )
-
-        points = []
-
-        uploaded_at = datetime.utcnow().isoformat()
-
-        for idx, (chunk, embedding) in enumerate(
-            zip(chunks, embeddings)
-        ):
-
-            payload = {
-
-                "document_id": document_id,
-
-                "document_hash": document_hash,
-
-                "chunk_id": idx,
-
-                "text": chunk,
-
-                "source_name": source_name,
-
-                "source_type": source_type,
-
-                "uploaded_at": uploaded_at,
-
-                "token_count": len(chunk.split()),
-
-            }
-
-            points.append(
-
-                PointStruct(
-
-                    id=str(uuid.uuid4()),
-
-                    vector=embedding.tolist(),
-
-                    payload=payload,
-
-                )
-
-            )
-
-        self.client.upsert(
-
-            collection_name=COLLECTION_NAME,
-
-            points=points,
-
-        )
-
-        print(f"Stored {len(points)} vectors.")
-
-        return document_id
-    
-    def generate_document_hash(self, text: str):
-
-        return hashlib.sha256(
-            text.encode("utf-8")
-        ).hexdigest()
-        
-    def document_exists(self, document_hash: str):
-
-        results = self.client.scroll(
-            collection_name=COLLECTION_NAME,
-            scroll_filter=Filter(
-                must=[
-                    FieldCondition(
-                        key="document_hash",
-                        match=MatchValue(
-                            value=document_hash
-                        ),
-                    )
-                ]
-            ),
-            limit=1,
-        )
-
-        return len(results[0]) > 0
-    
-    def retrieve(
-    self,
-    query: str,
-    top_k: int = 5,
-):
-
-        query_vector = self.embedding_model.encode(
-
-            query,
-
-            normalize_embeddings=True,
-
-        ).tolist()
-
-        results = self.client.query_points(
-
-            collection_name=COLLECTION_NAME,
-
-            query=query_vector,
-
-            limit=top_k,
-
-        )
-
-        retrieved_chunks = []
-
-        for point in results.points:
-
-            retrieved_chunks.append(
-
-                SearchResult(
-
-                    score=point.score,
-
-                    payload=point.payload,
-
-                )
-
-            )
-
-        return retrieved_chunks
-    
-    def build_prompt(
-    self,
-    query: str,
-    search_results,
-):
-
-        context = []
-
-        for result in search_results:
-
-            payload = result.payload
-
-            context.append(
-
-                f"""
-    Source : {payload['source_name']}
-    Type   : {payload['source_type']}
-    Chunk  : {payload['chunk_id']}
-
-    Content:
-    {payload['text']}
-    """
-            )
-
-        context = "\n\n".join(context)
-
-        prompt = f"""
-    You are LearnMate AI.
-
-    You are an educational assistant.
-
-    Rules:
-
-    1. Answer ONLY from the supplied context.
-
-    2. If the answer is not present,
-    say
-
-    "I could not find the answer in the uploaded resources."
-
-    3. Never make up information.
-
-    4. Keep answers concise.
-
-    5. Never generate citations or page numbers.
-
-    6. Never invent document names.
-
-    7. The application will attach citations automatically.
-
-    =========================
-    Retrieved Context
-    =========================
-
-    {context}
-
-    =========================
-    Question
-    =========================
-
-    {query}
-
-    =========================
-    Answer
-    =========================
-    """
-
-        return prompt
-    
-    
-    def generate_answer(
-    self,
-    query: str,
-):
-
-        search_results = self.retrieve(query)
-
-        prompt = self.build_prompt(
-            query,
-            search_results,
-        )
-
-        response = ollama.chat(
-
-            model=LLM_MODEL,
-
-            messages=[
-
-                {
-
-                    "role": "user",
-
-                    "content": prompt,
-
-                }
-
-            ],
-
-        )
-
-        answer = response["message"]["content"]
-
-        citations = []
-
-        seen = set()
-
-        for result in search_results:
-
-            payload = result.payload
-
-            key = (
-                payload["source_name"],
-                payload["chunk_id"],
-            )
-
-            if key not in seen:
-
-                seen.add(key)
-
-                citations.append(
-
-                    f"- {payload['source_name']} "
-                    f"(Chunk {payload['chunk_id']})"
-
-                )
-
-        answer += "\n\nSources\n"
-
-        answer += "\n".join(citations)
-
-        return answer, search_results
-    
-    def stream_answer(
-    self,
-    query: str,
-):
-
-        search_results = self.retrieve(query)
-
-        prompt = self.build_prompt(
-            query,
-            search_results,
-        )
-
-        stream = ollama.chat(
-
-            model=LLM_MODEL,
-
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
-
-            stream=True,
-        )
-
-        for chunk in stream:
-
-            yield chunk["message"]["content"]
+            if current and len(current)+len(sentence)+1 > CHUNK_SIZE:
+                chunks.append(current.strip()); current=current[-CHUNK_OVERLAP:]+" "+sentence
+            else: current += (" " if current else "")+sentence
+        return chunks + ([current.strip()] if current.strip() else [])
+    def add_document(self, text, source_name, source_type):
+        if not text or not text.strip(): raise ValueError("No extractable text was found.")
+        document_hash=self.generate_document_hash(text)
+        if self.document_exists(document_hash): return None
+        chunks=self.chunk_text(text)
+        if not chunks: raise ValueError("No sentence chunks could be created.")
+        document_id=str(uuid.uuid4()); uploaded_at=datetime.now(timezone.utc).isoformat(); embeddings=self.embedding_model.encode(chunks, normalize_embeddings=True); points=[]
+        for i,(chunk,vector) in enumerate(zip(chunks,embeddings)):
+            payload={"document_id":document_id,"document_hash":document_hash,"chunk_id":i,"text":chunk,"source_name":source_name,"source_type":source_type,"uploaded_at":uploaded_at,"token_count":len(chunk.split())}
+            points.append(PointStruct(id=str(uuid.uuid4()),vector=vector.tolist(),payload=payload))
+        self.client.upsert(COLLECTION_NAME,points=points,wait=True); self.rebuild_bm25_index(); return document_id
+    @staticmethod
+    def generate_document_hash(text): return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    def document_exists(self, document_hash):
+        points,_=self.client.scroll(COLLECTION_NAME,scroll_filter=Filter(must=[FieldCondition(key="document_hash",match=MatchValue(value=document_hash))]),limit=1); return bool(points)
+    def _all_payloads(self):
+        records=[]; offset=None
+        while True:
+            points,offset=self.client.scroll(COLLECTION_NAME,offset=offset,limit=256,with_payload=True,with_vectors=False)
+            records.extend({**p.payload,"_point_id":str(p.id)} for p in points if p.payload and p.payload.get("text"))
+            if offset is None: return records
+    @staticmethod
+    def _tokenize(text): return re.findall(r"\b\w+\b",text.lower())
+    def rebuild_bm25_index(self):
+        self._bm25_chunks=self._all_payloads(); tokens=[self._tokenize(c["text"]) for c in self._bm25_chunks]; self._bm25=BM25Okapi(tokens) if tokens else None
+    def retrieve_dense(self, query, top_k=DENSE_TOP_K):
+        vector=self.embedding_model.encode(query,normalize_embeddings=True).tolist(); points=self.client.query_points(COLLECTION_NAME,query=vector,limit=top_k).points
+        return [SearchResult(p.score,p.payload,str(p.id)) for p in points]
+    def retrieve_bm25(self, query, top_k=BM25_TOP_K):
+        if self._bm25 is None:return []
+        scores=self._bm25.get_scores(self._tokenize(query)); indices=sorted(range(len(scores)),key=lambda i:scores[i],reverse=True)[:top_k]
+        return [SearchResult(float(scores[i]),{k:v for k,v in self._bm25_chunks[i].items() if k!="_point_id"},self._bm25_chunks[i]["_point_id"]) for i in indices if scores[i]>0]
+    def retrieve(self, query, top_k=TOP_K):
+        fused={}
+        for ranking in (self.retrieve_dense(query),self.retrieve_bm25(query)):
+            for rank,result in enumerate(ranking,1):
+                key=result.point_id or f"{result.payload.get('document_id')}:{result.payload.get('chunk_id')}"; score,_=fused.get(key,(0,result)); fused[key]=(score+1/(RRF_K+rank),result)
+        return [SearchResult(score,result.payload,result.point_id) for score,result in sorted(fused.values(),key=lambda x:x[0],reverse=True)[:top_k]]
+    def build_prompt(self,query,search_results,history=None):
+        context="\n\n".join(f"Source: {r.payload['source_name']} (chunk {r.payload['chunk_id']})\n{r.payload['text']}" for r in search_results); conversation="\n".join(f"{m['role']}: {m['content']}" for m in (history or []))
+        return f"You are LearnMate AI, a concise educational assistant. Answer only from retrieved context. If it lacks the answer, say: I could not find the answer in the uploaded resources.\n\nRecent conversation:\n{conversation}\n\nRetrieved context:\n{context}\n\nQuestion: {query}\nAnswer:"
+    def _chat(self,prompt,stream=False): return ollama.Client(host=OLLAMA_HOST).chat(model=LLM_MODEL,messages=[{"role":"user","content":prompt}],stream=stream)
+    @staticmethod
+    def sources(results):
+        seen=set(); output=[]
+        for r in results:
+            p=r.payload; key=(p["source_name"],p["chunk_id"])
+            if key not in seen: seen.add(key); output.append({"source_name":key[0],"chunk_id":key[1],"source_type":p["source_type"]})
+        return output
+    def generate_answer(self,query,history=None):
+        results=self.retrieve(query); return self._chat(self.build_prompt(query,results,history))["message"]["content"],results
+    def stream_answer(self,query,history=None):
+        results=self.retrieve(query)
+        for chunk in self._chat(self.build_prompt(query,results,history),stream=True): yield chunk["message"]["content"]

@@ -91,6 +91,9 @@ def get_video_id(url: str):
 
     parsed = urlparse(url)
 
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError("Unsupported YouTube URL")
+
     hostname = parsed.hostname.lower() if parsed.hostname else ""
 
     # youtube.com/watch?v=...
@@ -122,7 +125,9 @@ def get_video_id(url: str):
     # youtu.be/<id>
     elif hostname == "youtu.be":
 
-        return parsed.path.strip("/")
+        video_id = parsed.path.strip("/").split("/")[0]
+        if video_id:
+            return video_id
 
     raise ValueError("Unsupported YouTube URL")
 
