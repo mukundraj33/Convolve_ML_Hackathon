@@ -1,19 +1,25 @@
 """Qdrant dense search + persistent-rebuildable BM25 + RRF generation engine."""
 from datetime import datetime, timezone
-import hashlib, re, uuid
+import hashlib, logging, re, uuid
 import ollama
 from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
-from config import *
+from config import (BM25_TOP_K, CHUNK_OVERLAP, CHUNK_SIZE, COLLECTION_NAME, DENSE_TOP_K,
+                    EMBEDDING_LOCAL_FILES_ONLY, EMBEDDING_MODEL, LLM_MODEL, OLLAMA_HOST, OLLAMA_NUM_PREDICT,
+                    QDRANT_PATH, QDRANT_URL, RRF_K, TOP_K)
 from models import SearchResult
+
+logger = logging.getLogger(__name__)
 
 class RAGEngine:
     def __init__(self):
-        self.embedding_model = SentenceTransformer(EMBEDDING_MODEL)
+        logger.info("Loading embedding model %s (local_files_only=%s)", EMBEDDING_MODEL, EMBEDDING_LOCAL_FILES_ONLY)
+        self.embedding_model = SentenceTransformer(EMBEDDING_MODEL, local_files_only=EMBEDDING_LOCAL_FILES_ONLY)
         self.client = QdrantClient(url=QDRANT_URL) if QDRANT_URL else QdrantClient(path=QDRANT_PATH)
         self.initialize_collection(); self._bm25 = None; self._bm25_chunks = []; self.rebuild_bm25_index()
+        logger.info("RAG engine ready with %s BM25 chunks", len(self._bm25_chunks))
     def initialize_collection(self):
         if COLLECTION_NAME not in {c.name for c in self.client.get_collections().collections}:
             self.client.create_collection(COLLECTION_NAME, vectors_config=VectorParams(size=self.embedding_model.get_embedding_dimension(), distance=Distance.COSINE))
@@ -65,7 +71,13 @@ class RAGEngine:
     def build_prompt(self,query,search_results,history=None):
         context="\n\n".join(f"Source: {r.payload['source_name']} (chunk {r.payload['chunk_id']})\n{r.payload['text']}" for r in search_results); conversation="\n".join(f"{m['role']}: {m['content']}" for m in (history or []))
         return f"You are LearnMate AI, a concise educational assistant. Answer only from retrieved context. If it lacks the answer, say: I could not find the answer in the uploaded resources.\n\nRecent conversation:\n{conversation}\n\nRetrieved context:\n{context}\n\nQuestion: {query}\nAnswer:"
-    def _chat(self,prompt,stream=False): return ollama.Client(host=OLLAMA_HOST).chat(model=LLM_MODEL,messages=[{"role":"user","content":prompt}],stream=stream)
+    def _chat(self,prompt,stream=False):
+        return ollama.Client(host=OLLAMA_HOST).chat(
+            model=LLM_MODEL,
+            messages=[{"role":"user","content":prompt}],
+            stream=stream,
+            options={"num_predict": OLLAMA_NUM_PREDICT},
+        )
     @staticmethod
     def sources(results):
         seen=set(); output=[]

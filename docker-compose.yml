@@ -7,6 +7,7 @@ services:
       QDRANT_URL: http://qdrant:6333
       MONGODB_URI: mongodb://mongodb:27017
       OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+      EMBEDDING_LOCAL_FILES_ONLY: "false"
     ports: ["8000:8000"]
     depends_on: [qdrant, mongodb]
     extra_hosts: ["host.docker.internal:host-gateway"]

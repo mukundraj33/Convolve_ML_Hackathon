@@ -23,6 +23,7 @@ from youtube_transcript_api._errors import (
     TranscriptsDisabled,
     NoTranscriptFound,
 )
+from requests import RequestException
 
 from urllib.parse import urlparse, parse_qs
 # ----------------------------
@@ -131,6 +132,14 @@ def get_video_id(url: str):
 
     raise ValueError("Unsupported YouTube URL")
 
+class TranscriptUnavailableError(RuntimeError):
+    """A valid video URL has no usable captions."""
+
+
+class YoutubeServiceError(RuntimeError):
+    """YouTube could not be reached from this runtime."""
+
+
 def extract_youtube_transcript(url: str):
 
     video_id = get_video_id(url)
@@ -148,15 +157,14 @@ def extract_youtube_transcript(url: str):
 
         return text
 
-    except TranscriptsDisabled:
-        raise Exception(
-            "This YouTube video has subtitles disabled."
-        )
+    except TranscriptsDisabled as error:
+        raise TranscriptUnavailableError("This YouTube video has subtitles disabled.") from error
 
-    except NoTranscriptFound:
-        raise Exception(
-            "No transcript available for this video."
-        )
+    except NoTranscriptFound as error:
+        raise TranscriptUnavailableError("No transcript available for this video.") from error
+
+    except RequestException as error:
+        raise YoutubeServiceError("YouTube could not be reached from this environment.") from error
 
 # ----------------------------
 # Dispatcher

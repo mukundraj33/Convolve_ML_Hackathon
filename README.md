@@ -17,7 +17,22 @@ pip install -r requirements.txt
 copy .env.example .env
 ```
 
-For local Qdrant storage, leave `QDRANT_URL` empty in `.env`. Start MongoDB and Ollama, pull the configured model, then run `uvicorn api:app --reload` and `python app.py`.
+For local Qdrant storage, leave `QDRANT_URL` empty in `.env`. The embedding model is loaded from the local Hugging Face cache by default (`EMBEDDING_LOCAL_FILES_ONLY=true`), avoiding an unnecessary startup network request.
+
+Start MongoDB with Docker Desktop if it is not already running:
+
+```bash
+docker compose up -d mongodb
+```
+
+Then start Ollama and the application:
+
+```bash
+ollama serve
+ollama pull llama3.1:8b
+uvicorn api:app --host 127.0.0.1 --port 8000
+python app.py
+```
 
 Open FastAPI documentation at `http://127.0.0.1:8000/docs` and Gradio at `http://127.0.0.1:7860`.
 
@@ -28,6 +43,7 @@ Open FastAPI documentation at `http://127.0.0.1:8000/docs` and Gradio at `http:/
 - `POST /query` — JSON `{ "question": "...", "session_id": "optional" }`; returns answer, sources, and session ID.
 - `POST /query/stream` — same request body; streams plain-text tokens and returns the session ID in `X-Session-ID`.
 - `GET /history/{session_id}` — returns the configured window of persisted messages.
+- `GET /health` — reports whether RAG and MongoDB initialized successfully.
 
 MongoDB is required for query endpoints so the application never silently pretends that persistent memory works. Configure `MEMORY_WINDOW` to bound the context passed to the model.
 
@@ -48,6 +64,6 @@ Compose starts FastAPI, Gradio, Qdrant, and MongoDB with named data volumes. Oll
 
 ## Tests and limitations
 
-Run `pytest -q` for service-free unit tests covering sentence chunking, duplicate hashing, YouTube URL parsing, and RRF behavior. Database, streaming, and Docker tests require the corresponding external services and are integration checks.
+Run `python -m unittest -v test_core` for service-free unit tests covering sentence chunking, duplicate hashing, YouTube URL parsing, and RRF behavior. Database, streaming, and Docker tests require the corresponding external services and are integration checks.
 
 The system is text-and-transcript multimodal, not image-understanding multimodal. Retrieval quality depends on source content and the locally available embedding model; there is no reranker or OCR for scanned PDFs.
